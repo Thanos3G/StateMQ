@@ -19,7 +19,7 @@ This pattern made systems increasingly difficult to extend, reason about, and ma
 StateMQ’s approach:
 
 - Treat MQTT messages as events, not commands.
-- Events trigger explicit state transitions.
+- Events trigger explicit state changes.
 - The system is always in exactly one known state.
 - States are represented internally by small integer identifiers.
 - Application logic reacts to state changes rather than raw messages.
@@ -28,7 +28,7 @@ StateMQ’s approach:
 Execution model:
 
 - MQTT messages are processed sequentially.
-- State transitions are resolved using a fixed, table-driven `(topic, payload) → state` mapping.
+- State changes are resolved using a fixed, table-driven `(topic, payload) → state` mapping.
 - Execution remains deterministic and predictable.
 
 Originally developed for ESP32, the core abstraction is platform-agnostic and applicable to other state-driven, message-based embedded systems.
@@ -121,13 +121,13 @@ subscription and publication beyond the state mapping.
      |-------------------------------------------|
      | - network and MQTT lifecycle              |
      | - event delivery                          |
-     | - state rules and transitions             |
+     | - state rules and changes                 |
      | - known state tracking                    |
      | - periodic task scheduling                |
      +------------------------------------------+
                          |
                          v
-                    state transition
+                    state change
                          |
         +----------------+-------------------+
         |                |                   |
@@ -142,15 +142,15 @@ subscription and publication beyond the state mapping.
 ```
 ## Core API
 
-### State Transitions
+### State Changes
 
 StateMQ processes MQTT messages one at a time and resolves state changes
 using a simple rule table that maps incoming messages to integer state identifiers.
-State transitions are serialized using a mutex to ensure thread-safe, deterministic updates.
+State changes are serialized using a mutex to ensure thread-safe, deterministic updates.
 
 When an MQTT message arrives, StateMQ checks each configured rule in the
 order it was added. If a rule matches the message topic and payload, the
-system transitions to the corresponding state. If no rule matches, the
+system jumps to the corresponding state. If no rule matches, the
 current state remains unchanged.
 
 ```text
@@ -169,7 +169,7 @@ could be implemented using an indexed lookup instead of a linear scan.
 
 ### Message to State Mapping
 
-State transitions are defined declaratively by mapping incoming MQTT messages to states:
+State changes are defined declaratively by mapping incoming MQTT messages to states:
 
 
 ```cpp
@@ -228,7 +228,7 @@ in the Arduino and ESP-IDF example projects included in this repository.
 
 - **Arduino-ESP32**  
   Same StateMQ core, Arduino WiFi integration, and FreeRTOS task execution under the Arduino runtime.  
-  Wi-Fi connection and readiness are handled using lightweight polling during startup due to Arduino runtime constraints, while MQTT messaging and state transitions remain event-driven and deterministic.
+  Wi-Fi connection and readiness are handled using lightweight polling during startup due to Arduino runtime constraints, while MQTT messaging and state changes remain event-driven and deterministic.
   
 
 The core abstraction is designed to be portable and may be adapted to
@@ -248,7 +248,7 @@ documented in the core headers where they can be adjusted if needed.
 
 These constraints also exist to preserve deterministic execution.
 StateMQ avoids unbounded queues, dynamic task creation, and runtime
-modification of transition logic, ensuring that system behavior remains
+modification of state changing logic, ensuring that system behavior remains
 repeatable under identical inputs. 
 
 
