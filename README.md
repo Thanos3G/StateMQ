@@ -78,9 +78,12 @@ The repository includes a ready-to-build ESP-IDF project.
 
    ```text
    arduino/StateMQ  →  ~/Arduino/libraries/StateMQ
+    ```
 3. Restart the Arduino IDE.
 4. Include the library in your sketch:
+   ```text
     #include <StateMQ.h>
+   ```
 The Arduino integration uses ESP-IDF’s esp-mqtt internally while exposing the same
 StateMQ core API.
 
