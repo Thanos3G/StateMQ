@@ -5,7 +5,7 @@
 // MQTT interface (what to publish / subscribe):
 // - Publish to:   blocking/state
 //   Messages:     "alive"
-//   Effect:       changes internal StateMQ state (integer StateId)
+//   Effect:       changes internal StateMQ state 
 //
 // Notes:
 // - Demonstrates coexistence of StateMQ-managed tasks with a blocking FreeRTOS task.
@@ -108,5 +108,5 @@ extern "C" void app_main(void) {
   const char* broker = CONFIG_STATEMQ_BROKER_URI;
 
   // Start Wi-Fi and MQTT (state topic stays in main)
-  esp.begin(ssid, pass, broker, nullptr);
+  esp.begin(ssid, pass, broker);
 }

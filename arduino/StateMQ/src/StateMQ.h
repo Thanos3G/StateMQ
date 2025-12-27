@@ -4,12 +4,13 @@
 #include <cstddef>
 #include <cstring>
 
-#if defined(ARDUINO) && defined(ESP32)
+#if defined(ESP_PLATFORM) || (defined(ARDUINO) && defined(ESP32))
   #include "freertos/FreeRTOS.h"
   #include "freertos/semphr.h"
 #else
-  #error "StateMQ supports ESP32 Arduino only."
+  #error "StateMQ supports ESP32 only."
 #endif
+
 
 namespace statemq {
 
@@ -26,8 +27,13 @@ struct TaskDef {
   uint32_t    period_ms;
   Stack       stack;
   void      (*callback)();
+  // Context
+  void      (*callbackEx)(void* user);
+  void*       user;
   bool        enabled;
 };
+
+
 
 // Maps an incoming topic + payload to a declared state.
 struct Rule {
@@ -49,10 +55,19 @@ public:
 
   // Register a periodic callback managed by the internal scheduler.
   TaskId taskEvery(const char* name,
-                   uint32_t period_ms,
-                   Stack stack,
-                   void (*callback)(),
-                   bool enabled = true);
+                  uint32_t period_ms,
+                  Stack stack,
+                  void (*callback)(),
+                  bool enabled = true);
+
+  // context
+  TaskId taskEvery(const char* name,
+                  uint32_t period_ms,
+                  Stack stack,
+                  void (*callback)(void* user),
+                  void* user,
+                  bool enabled = true);
+
 
   bool taskEnable(TaskId id, bool enable);
   bool taskEnabled(TaskId id) const;
@@ -64,8 +79,31 @@ public:
 
   bool connected() const;
 
-  using StateChangeCb = void (*)(const char* newState);
+  enum class StateChangeCause : uint8_t {
+    Unknown   = 0,
+    RuleMatch = 1,
+    Connected = 2,
+    Disconn   = 3
+  };
+
+  struct StateChangeCtx {
+    StateId prev;
+    StateId desired;
+    StateId curr;
+    StateChangeCause cause;
+    int16_t ruleIndex;
+    const char* topic;
+    const char* payload;
+    void* user;
+  };
+
+  using StateChangeCb   = void (*)(StateId prev, StateId next);
+  using StateChangeCbEx = void (*)(const StateChangeCtx& ctx);
+
   void onStateChange(StateChangeCb cb);
+  void onStateChange(StateChangeCbEx cb, void* user = nullptr);
+
+  const char* stateName(StateId id) const;
 
   // Platform backends drive these functions.
   bool applyMessage(const char* topic, const char* payload);
@@ -95,7 +133,12 @@ private:
     const StateMQ& n;
   };
 
-  void setStateId(StateId newId, bool userState);
+  void setStateId(StateId desiredId,
+                  bool userState,
+                  StateChangeCause cause,
+                  const char* topic,
+                  const char* payload,
+                  int16_t ruleIndex);
 
   bool isKnownState(const char* s) const;
   void addKnownState(const char* s);
@@ -128,7 +171,9 @@ private:
   size_t   knownStateCount;
 
   bool     connected_;
-  StateChangeCb stateCb;
+  StateChangeCb   stateCb;
+  StateChangeCbEx stateCbEx;
+  void*           stateCbUser;
 
   mutable StaticSemaphore_t mutexBuf;
   mutable SemaphoreHandle_t mutex;

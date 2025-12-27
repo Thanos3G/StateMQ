@@ -7,20 +7,19 @@ namespace statemq {
 // ------------ locking ------------
 // All core state (rules/tasks/stateId/knownStates) is protected by this lock.
 void StateMQ::lock() const {
-#ifdef ESP_PLATFORM
-  xSemaphoreTake(mutex, portMAX_DELAY);
-#else
-  mutex.lock();
+#if defined(ESP_PLATFORM) || (defined(ARDUINO) && defined(ESP32))
+  if (mutex) xSemaphoreTakeRecursive(mutex, portMAX_DELAY);
 #endif
 }
 
+
 void StateMQ::unlock() const {
-#ifdef ESP_PLATFORM
-  xSemaphoreGive(mutex);
-#else
-  mutex.unlock();
+#if defined(ESP_PLATFORM) || (defined(ARDUINO) && defined(ESP32))
+  if (mutex) xSemaphoreGiveRecursive(mutex);
 #endif
 }
+
+
 
 // ------------ known state helpers ------------
 bool StateMQ::isKnownState(const char* s) const {
@@ -54,6 +53,7 @@ void StateMQ::addKnownState(const char* s) {
 //   1 = CONNECTED_ID
 //   2.. = user-defined known states in insertion order (knownStates[])
 // StateId values must remain stable for the lifetime of the node.
+
 
 StateMQ::StateId StateMQ::stateIdForKnown(const char* s) const {
   if (!s) return CONNECTED_ID;
@@ -90,15 +90,19 @@ StateMQ::StateMQ()
     lastUserStateId_(CONNECTED_ID),
     knownStateCount(0),
     connected_(false),
-    stateCb(nullptr)
-#ifdef ESP_PLATFORM
-  , mutex(nullptr)
-#endif
+    stateCb(nullptr),
+    stateCbEx(nullptr),
+    stateCbUser(nullptr),
+    mutex(nullptr)
 {
-#ifdef ESP_PLATFORM
-  mutex = xSemaphoreCreateMutexStatic(&mutexBuf);
+#if defined(ESP_PLATFORM) || (defined(ARDUINO) && defined(ESP32))
+  mutex = xSemaphoreCreateRecursiveMutexStatic(&mutexBuf);
+  if (!mutex) {
+    mutex = xSemaphoreCreateRecursiveMutex();
+  }
 #endif
 }
+
 
 // ------------ USER API ------------
 StateMQ::StateId StateMQ::map(const char* topic, const char* message, const char* state) {
@@ -134,9 +138,38 @@ StateMQ::TaskId StateMQ::taskEvery(const char* name,
   Guard g(*this);
   if (taskCount_ >= MAX_TASKS) return (TaskId)-1;
 
-  tasks[taskCount_] = TaskDef{ name, period_ms, stack, callback, enabled };
+  tasks[taskCount_] = TaskDef{
+    name, period_ms, stack,
+    callback,
+    nullptr,
+    nullptr,
+    enabled
+  };
   return taskCount_++;
 }
+
+StateMQ::TaskId StateMQ::taskEvery(const char* name,
+                                   uint32_t period_ms,
+                                   Stack stack,
+                                   void (*callback)(void*),
+                                   void* user,
+                                   bool enabled) {
+  if (!callback) return (TaskId)-1;
+
+  Guard g(*this);
+  if (taskCount_ >= MAX_TASKS) return (TaskId)-1;
+
+  tasks[taskCount_] = TaskDef{
+    name, period_ms, stack,
+    nullptr,
+    callback,
+    user,
+    enabled
+  };
+  return taskCount_++;
+}
+
+
 
 bool StateMQ::taskEnable(TaskId id, bool enable) {
   Guard g(*this);
@@ -149,8 +182,8 @@ bool StateMQ::taskEnabled(TaskId id) const {
   Guard g(*this);
   if (id >= taskCount_) return false;
   return tasks[id].enabled;
+  
 }
-
 // Returns a thread-local copy to provide a stable C-string even if the
 // underlying state changes immediately after this call.
 
@@ -176,6 +209,12 @@ const char* StateMQ::state() const {
   return copy;
 }
 
+const char* StateMQ::stateName(StateId id) const {
+  Guard g(*this);
+  return stateStrForId(id);
+}
+
+
 StateMQ::StateId StateMQ::stateId() const {
   Guard g(*this);
 
@@ -194,6 +233,12 @@ void StateMQ::onStateChange(StateChangeCb cb) {
   stateCb = cb;
 }
 
+void StateMQ::onStateChange(StateChangeCbEx cb, void* user) {
+  Guard g(*this);
+  stateCbEx = cb;
+  stateCbUser = user;
+}
+
 // ------------ PLATFORM API ------------
 // Topic/payload matching is string-based; on match we transition using integer state IDs.
 
@@ -201,6 +246,7 @@ bool StateMQ::applyMessage(const char* topic, const char* payload) {
   if (!topic || !payload) return false;
 
   StateId matched = CONNECTED_ID;
+  int16_t matchedRule = -1;
   bool found = false;
 
   {
@@ -209,6 +255,7 @@ bool StateMQ::applyMessage(const char* topic, const char* payload) {
       if (std::strcmp(rules[i].topic, topic) == 0 &&
           std::strcmp(rules[i].message, payload) == 0) {
         matched = rules[i].stateId;
+        matchedRule = (int16_t)i;
         found = true;
         break;
       }
@@ -216,7 +263,7 @@ bool StateMQ::applyMessage(const char* topic, const char* payload) {
   }
 
   if (found) {
-    setStateId(matched, true);
+    setStateId(matched, true, StateChangeCause::RuleMatch, topic, payload, matchedRule);
     return true;
   }
   return false;
@@ -224,6 +271,7 @@ bool StateMQ::applyMessage(const char* topic, const char* payload) {
 
 void StateMQ::setConnected(bool connectedIn) {
   StateId target = OFFLINE_ID;
+  StateChangeCause cause = connectedIn ? StateChangeCause::Connected : StateChangeCause::Disconn;
 
   {
     Guard g(*this);
@@ -236,7 +284,7 @@ void StateMQ::setConnected(bool connectedIn) {
     }
   }
 
-  setStateId(target, false);
+  setStateId(target, false, cause, nullptr, nullptr, -1);
 }
 
 size_t StateMQ::taskCount() const {
@@ -262,47 +310,63 @@ const Rule& StateMQ::rule(size_t index) const {
 // ------------ INTERNAL ------------
 // Topic/payload matching is string-based; on match we transition using integer state IDs.
 
-void StateMQ::setStateId(StateId newId, bool userState) {
+void StateMQ::setStateId(StateId desiredId,
+                         bool userState,
+                         StateChangeCause cause,
+                         const char* topic,
+                         const char* payload,
+                         int16_t ruleIndex) {
   StateChangeCb cb = nullptr;
-  char cbState[STATE_LEN];
+  StateChangeCbEx cbEx = nullptr;
+  StateChangeCtx ctx{};
+
+  bool fire = false;
 
   {
     Guard g(*this);
 
+    const StateId prev = stateId_;
+    StateId desired = desiredId;
+    StateId applied = desiredId;
+
     if (!connected_) {
-      if (stateId_ != OFFLINE_ID) {
-        stateId_ = OFFLINE_ID;
-
-        cb = stateCb;
-        const char* s = stateStrForId(stateId_);
-        std::strncpy(cbState, s, STATE_LEN);
-        cbState[STATE_LEN - 1] = '\0';
-      }
+      applied = OFFLINE_ID;
+      if (stateId_ == OFFLINE_ID) return;
+      stateId_ = OFFLINE_ID;
+      fire = true;
     } else {
-      if (newId != OFFLINE_ID && newId != CONNECTED_ID) {
-        const size_t idx = (size_t)(newId - 2);
-        if (idx >= knownStateCount) newId = CONNECTED_ID;
+      if (applied != OFFLINE_ID && applied != CONNECTED_ID) {
+        const size_t idx = (size_t)(applied - 2);
+        if (idx >= knownStateCount) applied = CONNECTED_ID;
       }
 
-      if (userState && newId != OFFLINE_ID && newId != CONNECTED_ID) {
-        lastUserStateId_ = newId;
+      if (userState && applied != OFFLINE_ID && applied != CONNECTED_ID) {
+        lastUserStateId_ = applied;
       }
 
-      if (stateId_ == newId) return;
+      if (stateId_ == applied) return;
 
-      stateId_ = newId;
-
-      cb = stateCb;
-      const char* s = stateStrForId(stateId_);
-      std::strncpy(cbState, s, STATE_LEN);
-      cbState[STATE_LEN - 1] = '\0';
+      stateId_ = applied;
+      fire = true;
     }
+
+    cb   = stateCb;
+    cbEx = stateCbEx;
+
+    ctx.prev = prev;
+    ctx.desired = desired;
+    ctx.curr = stateId_;
+    ctx.cause = cause;
+    ctx.ruleIndex = ruleIndex;
+    ctx.topic = topic;
+    ctx.payload = payload;
+    ctx.user = stateCbUser;
   }
 
-    // Capture callback + state string under lock, but invoke callback after unlocking
-   // to avoid re-entrancy/deadlocks if user code calls back into StateMQ.
+  if (!fire) return;
 
-  if (cb) cb(cbState);
+  if (cb) cb(ctx.prev, ctx.curr);
+  if (cbEx) cbEx(ctx);
 }
 
 } // namespace statemq

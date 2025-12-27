@@ -8,7 +8,6 @@ const char* WIFI_PASS = "your_wifi_password";
 // MQTT broker address
 const char* MQTT_BROKER = "mqtt://broker_ip:1883";
 
-
 // MQTT topic used to control the state
 const char* STATE_TOPIC = "blocking/state";
 

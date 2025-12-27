@@ -5,14 +5,9 @@
 #include <cstring>
 
 #include "esp_log.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 
-namespace statemq {
-  // keep namespace inside cpp only
-}
-
-static uint32_t stackBytesFor(statemq::Stack s) {
+// Stack sizing
+uint32_t StateMQEsp32::stackBytesFor(statemq::Stack s) {
   switch (s) {
     case statemq::Stack::Small:  return 2048;
     case statemq::Stack::Medium: return 4096;
@@ -39,7 +34,6 @@ void StateMQEsp32::freestr(char*& s) {
 }
 
 // core locking (recursive mutex)
-
 bool StateMQEsp32::tryLockCoreForMs(uint32_t ms) {
   SemaphoreHandle_t m = core.mutexHandle();
   if (!m) return true;
@@ -59,7 +53,6 @@ void StateMQEsp32::unlockCore() {
 }
 
 // Construction / destruction
-
 StateMQEsp32::StateMQEsp32(statemq::StateMQ& core)
 : core(core) {}
 
@@ -68,7 +61,6 @@ StateMQEsp32::~StateMQEsp32() {
 }
 
 // settings
-
 void StateMQEsp32::setKeepAliveSeconds(uint16_t sec) {
   if (sec == 0) sec = 60;
   keepAliveSec = sec;
@@ -108,78 +100,6 @@ void StateMQEsp32::setSubscribeQos(const char* topic, int qos) {
     qosValue[qosCount] = (int8_t)qos;
     qosCount++;
   }
-}
-
-int StateMQEsp32::rawIndex(const char* topic) const {
-  if (!topic) return -1;
-  for (size_t i = 0; i < rawCount; ++i) {
-    if (raw[i].topic[0] && strcmp(raw[i].topic, topic) == 0) return (int)i;
-  }
-  return -1;
-}
-
-// RAW Subscribe
-
-bool StateMQEsp32::subscribe(const char* topic, int qos) {
-  if (!topic || !*topic) return false;
-
-  if (qos < 0) qos = 0;
-  if (qos > 2) qos = 2;
-
-  lockCoreBlocking();
-
-  int idx = rawIndex(topic);
-  if (idx < 0) {
-    if (rawCount >= MAX_RAW_SUBS) {
-      unlockCore();
-      return false;
-    }
-
-    RawSlot& s = raw[rawCount];
-    strncpy(s.topic, topic, RAW_TOPIC_LEN);
-    s.topic[RAW_TOPIC_LEN - 1] = '\0';
-    s.payload[0] = '\0';
-    s.hasNew = false;
-
-    idx = (int)rawCount;
-    rawCount++;
-  }
-
-  unlockCore();
-
-  // remember QoS override 
-  setSubscribeQos(topic, qos);
-
-  // if already connected, subscribe immediately
-  if (mqtt && mqttConnected) {
-    esp_mqtt_client_subscribe(mqtt, topic, qos);
-  }
-
-  return true;
-}
-
-const char* StateMQEsp32::msg(const char* topic) {
-  if (!topic || !*topic) return nullptr;
-
-  lockCoreBlocking();
-
-  int idx = rawIndex(topic);
-  if (idx < 0) {
-    unlockCore();
-    return nullptr;
-  }
-
-  RawSlot& s = raw[(size_t)idx];
-  if (!s.hasNew) {
-    unlockCore();
-    return nullptr;
-  }
-
-  s.hasNew = false;
-  const char* out = s.payload;
-
-  unlockCore();
-  return out;
 }
 
 int StateMQEsp32::qosForTopic(const char* topic) const {
@@ -229,8 +149,77 @@ void StateMQEsp32::silenceEspIdfNoise() {
   esp_log_level_set("TRANSPORT_TCP", ESP_LOG_WARN);
 }
 
-// Cleanup helpers
+// RAW Subscribe
+int StateMQEsp32::rawIndex(const char* topic) const {
+  if (!topic) return -1;
+  for (size_t i = 0; i < rawCount; ++i) {
+    if (raw[i].topic[0] && strcmp(raw[i].topic, topic) == 0) return (int)i;
+  }
+  return -1;
+}
 
+bool StateMQEsp32::subscribe(const char* topic, int qos) {
+  if (!topic || !*topic) return false;
+
+  if (qos < 0) qos = 0;
+  if (qos > 2) qos = 2;
+
+  lockCoreBlocking();
+
+  int idx = rawIndex(topic);
+  if (idx < 0) {
+    if (rawCount >= MAX_RAW_SUBS) {
+      unlockCore();
+      return false;
+    }
+
+    RawSlot& s = raw[rawCount];
+    strncpy(s.topic, topic, RAW_TOPIC_LEN);
+    s.topic[RAW_TOPIC_LEN - 1] = '\0';
+    s.payload[0] = '\0';
+    s.hasNew = false;
+
+    rawCount++;
+  }
+
+  unlockCore();
+
+  // remember QoS override
+  setSubscribeQos(topic, qos);
+
+  // if already connected, subscribe immediately
+  if (mqtt && mqttConnected) {
+    esp_mqtt_client_subscribe(mqtt, topic, qos);
+  }
+
+  return true;
+}
+
+const char* StateMQEsp32::msg(const char* topic) {
+  if (!topic || !*topic) return nullptr;
+
+  lockCoreBlocking();
+
+  int idx = rawIndex(topic);
+  if (idx < 0) {
+    unlockCore();
+    return nullptr;
+  }
+
+  RawSlot& s = raw[(size_t)idx];
+  if (!s.hasNew) {
+    unlockCore();
+    return nullptr;
+  }
+
+  s.hasNew = false;
+  const char* out = s.payload;
+
+  unlockCore();
+  return out;
+}
+
+// Cleanup helpers
 void StateMQEsp32::freeUserTasks() {
   UserTaskCtx* cur = userTasks;
   userTasks = nullptr;
@@ -271,11 +260,23 @@ void StateMQEsp32::cleanup(bool disconnect_wifi, bool clear_config) {
   freestr(wifiSsid);
   freestr(wifiPass);
   freestr(brokerUri);
+  
 
   if (clear_config) {
     freeQosOverrides();
     freestr(willTopic);
     freestr(willPayload);
+    freestr(stateTopic);
+    statePubEnabled = false;
+    hasLastStatePub = false;
+
+
+    rawCount = 0;
+    for (size_t i = 0; i < MAX_RAW_SUBS; ++i) {
+      raw[i].topic[0] = '\0';
+      raw[i].payload[0] = '\0';
+      raw[i].hasNew = false;
+    }
   }
 
   backoffMs = 2000;
@@ -292,8 +293,7 @@ void StateMQEsp32::end(bool disconnect_wifi) {
   cleanup(disconnect_wifi, true);
 }
 
-// begin 
-
+// begin
 bool StateMQEsp32::begin(const char* wifi_ssid,
                          const char* wifi_pass,
                          const char* broker_uri) {
@@ -335,6 +335,8 @@ bool StateMQEsp32::begin(const char* wifi_ssid,
   Serial.println("[MQTT] starting...");
 
   esp_mqtt_client_config_t mcfg = {};
+  // Note: Arduino core uses ESP-IDF underneath; newer IDF uses broker.address.uri + session.keepalive
+
   mcfg.uri       = brokerUri;
   mcfg.keepalive = keepAliveSec;
 
@@ -353,7 +355,7 @@ bool StateMQEsp32::begin(const char* wifi_ssid,
 
   esp_mqtt_client_register_event(
     mqtt,
-    (esp_mqtt_event_id_t)ESP_EVENT_ANY_ID,
+    MQTT_EVENT_ANY,
     &mqtt_event_handler_trampoline,
     this
   );
@@ -366,7 +368,6 @@ bool StateMQEsp32::begin(const char* wifi_ssid,
   }
 
   // ---- Create user tasks  ----
-
   userTasks = nullptr;
 
   for (size_t i = 0; i < core.taskCount(); ++i) {
@@ -377,9 +378,12 @@ bool StateMQEsp32::begin(const char* wifi_ssid,
 
     ctx->owner = this;
     ctx->fn = t.callback;
+    ctx->fnEx = t.callbackEx;
+    ctx->user = t.user;
     ctx->period_ms = t.period_ms;
     ctx->handle = nullptr;
     ctx->next = nullptr;
+    ctx->id = i;
 
     TaskHandle_t handle = nullptr;
     const uint32_t stackBytes = stackBytesFor(t.stack);
@@ -414,7 +418,6 @@ bool StateMQEsp32::begin(const char* wifi_ssid,
 }
 
 // reconnect supervisor
-
 void StateMQEsp32::startReconnectTask() {
   if (reconnectTask) return;
 
@@ -449,13 +452,15 @@ void StateMQEsp32::reconnectLoop() {
     }
     printedMqtt = false;
 
-    if (now >= nextTryMs) {
-      Serial.println("[WiFi] reconnecting...");
-      WiFi.disconnect(false);
-      WiFi.begin(wifiSsid ? wifiSsid : "", wifiPass ? wifiPass : "");
-      nextTryMs = now + backoffMs;
-      backoffMs = (backoffMs * 2U > 30000U) ? 30000U : (backoffMs * 2U);
-    }
+
+    // Block may influcence connectivity, please uncomment if it works for you
+    // if (now >= nextTryMs) {
+    //   Serial.println("[WiFi] reconnecting...");
+    //   WiFi.disconnect(false);
+    //   WiFi.begin(wifiSsid ? wifiSsid : "", wifiPass ? wifiPass : "");
+    //   nextTryMs = now + backoffMs;
+    //   backoffMs = (backoffMs * 2U > 30000U) ? 30000U : (backoffMs * 2U);
+    // }
     return;
   }
 
@@ -483,7 +488,6 @@ void StateMQEsp32::reconnectLoop() {
 }
 
 // MQTT events
-
 void StateMQEsp32::onMqttEvent(esp_mqtt_event_handle_t event) {
   if (!event) return;
 
@@ -512,63 +516,35 @@ void StateMQEsp32::onMqttEvent(esp_mqtt_event_handle_t event) {
       break;
 
     case MQTT_EVENT_DATA: {
+      char topic[RAW_TOPIC_LEN];
+      char data[RAW_PAYLOAD_LEN];
+
       const size_t tlen = (event->topic_len > 0) ? (size_t)event->topic_len : 0;
       const size_t dlen = (event->data_len  > 0) ? (size_t)event->data_len  : 0;
+      if (tlen == 0) break;
 
-      // allocate exact sized buffers so mapped topics/payloads are never truncated
-      char* topic = new (std::nothrow) char[tlen + 1];
-      char* data  = new (std::nothrow) char[dlen + 1];
+      size_t tcopy = (tlen < sizeof(topic) - 1) ? tlen : (sizeof(topic) - 1);
+      size_t dcopy = (dlen < sizeof(data)  - 1) ? dlen : (sizeof(data)  - 1);
 
-      if (topic && data) {
-        if (tlen) memcpy(topic, event->topic, tlen);
-        if (dlen) memcpy(data,  event->data,  dlen);
-        topic[tlen] = '\0';
-        data[dlen]  = '\0';
+      memcpy(topic, event->topic, tcopy);
+      topic[tcopy] = '\0';
 
-        lockCoreBlocking();
+      memcpy(data, event->data, dcopy);
+      data[dcopy] = '\0';
 
-        core.applyMessage(topic, data);
+      lockCoreBlocking();
 
-        int idx = rawIndex(topic);
-        if (idx >= 0) {
-          RawSlot& s = raw[(size_t)idx];
-          strncpy(s.payload, data, RAW_PAYLOAD_LEN);
-          s.payload[RAW_PAYLOAD_LEN - 1] = '\0';
-          s.hasNew = true;
-        }
+      core.applyMessage(topic, data);
 
-        unlockCore();
-      } else {
-        // fallback to fixed buffers if OOM
-        char tbuf[128];
-        char dbuf[128];
-
-        size_t tcopy = (tlen < sizeof(tbuf) - 1) ? tlen : (sizeof(tbuf) - 1);
-        size_t dcopy = (dlen < sizeof(dbuf) - 1) ? dlen : (sizeof(dbuf) - 1);
-
-        if (tcopy) memcpy(tbuf, event->topic, tcopy);
-        if (dcopy) memcpy(dbuf, event->data,  dcopy);
-
-        tbuf[tcopy] = '\0';
-        dbuf[dcopy] = '\0';
-
-        lockCoreBlocking();
-
-        core.applyMessage(tbuf, dbuf);
-
-        int idx = rawIndex(tbuf);
-        if (idx >= 0) {
-          RawSlot& s = raw[(size_t)idx];
-          strncpy(s.payload, dbuf, RAW_PAYLOAD_LEN);
-          s.payload[RAW_PAYLOAD_LEN - 1] = '\0';
-          s.hasNew = true;
-        }
-
-        unlockCore();
+      int idx = rawIndex(topic);
+      if (idx >= 0) {
+        RawSlot& s = raw[(size_t)idx];
+        strncpy(s.payload, data, RAW_PAYLOAD_LEN);
+        s.payload[RAW_PAYLOAD_LEN - 1] = '\0';
+        s.hasNew = true;
       }
 
-      delete[] topic;
-      delete[] data;
+      unlockCore();
       break;
     }
 
@@ -578,13 +554,12 @@ void StateMQEsp32::onMqttEvent(esp_mqtt_event_handle_t event) {
 }
 
 // subscribe unique topics using per-topic QoS
-
 void StateMQEsp32::subscribeAllUnique() {
   if (!mqtt) return;
 
   lockCoreBlocking();
 
-  // subscribe STATE topics 
+  // subscribe STATE topics
   const size_t n = core.ruleCount();
   for (size_t i = 0; i < n; ++i) {
     const statemq::Rule& r = core.rule(i);
@@ -614,7 +589,6 @@ void StateMQEsp32::subscribeAllUnique() {
 }
 
 // publish helper
-
 bool StateMQEsp32::publish(const char* topic,
                            const char* payload,
                            int qos,
@@ -630,31 +604,64 @@ bool StateMQEsp32::publish(const char* topic,
   return esp_mqtt_client_publish(mqtt, topic, payload, 0, qos, retain) >= 0;
 }
 
+//enable state publish
+void StateMQEsp32::StatePublishTopic(const char* topic, int qos, bool enable, bool retain) {
+  freestr(stateTopic);
+  stateTopic = dupstr(topic ? topic : "");
+  statePubQos = qos;
+  statePubEnabled = enable && stateTopic && stateTopic[0];
+  statePubRetain  = retain;
+
+  hasLastStatePub = false;
+  lastStatePub = statemq::StateMQ::OFFLINE_ID;
+
+   core.onStateChange(&StateMQEsp32::on_state_change_trampoline, this);
+
+}
+
+
+
 bool StateMQEsp32::connected() const {
   return (WiFi.status() == WL_CONNECTED) && mqttConnected;
 }
 
-// trampolines
+// enable/disable a task by id
+bool StateMQEsp32::taskEnable(statemq::StateMQ::TaskId id, bool enable) {
+  core.taskEnable(id, enable);
 
+  UserTaskCtx* cur = userTasks;
+  while (cur) {
+    if (cur->id == id && cur->handle) {
+      enable ? vTaskResume(cur->handle) : vTaskSuspend(cur->handle);
+      return true;
+    }
+    cur = cur->next;
+  }
+  return false;
+}
+
+// trampolines
 void StateMQEsp32::user_task_trampoline(void* arg) {
   UserTaskCtx* ctx = static_cast<UserTaskCtx*>(arg);
-  uint32_t period = ctx ? ctx->period_ms : 1000;
-  void (*fn)() = ctx ? ctx->fn : nullptr;
+  if (!ctx) vTaskDelete(nullptr);
 
   for (;;) {
-    if (fn) {
-      bool locked = true;
-      if (ctx && ctx->owner) {
-        locked = ctx->owner->tryLockCoreForMs(10);
-      }
-
-      if (locked) {
-        fn();
-        if (ctx && ctx->owner) ctx->owner->unlockCore();
-      }
+    bool locked = true;
+    if (ctx && ctx->owner) {
+      locked = ctx->owner->tryLockCoreForMs(10);
     }
 
-    vTaskDelay(pdMS_TO_TICKS(period));
+    if (locked) {
+      if (ctx->fn) {
+        ctx->fn();
+      } else if (ctx->fnEx) {
+        ctx->fnEx(ctx->user);
+      }
+
+      if (ctx && ctx->owner) ctx->owner->unlockCore();
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(ctx ? ctx->period_ms : 1000));
   }
 }
 
@@ -670,3 +677,48 @@ void StateMQEsp32::mqtt_event_handler_trampoline(void* handler_args,
 
   self->onMqttEvent((esp_mqtt_event_handle_t)event_data);
 }
+
+void StateMQEsp32::on_state_change_trampoline(const statemq::StateMQ::StateChangeCtx& ctx) {
+  auto* self = static_cast<StateMQEsp32*>(ctx.user);
+  if (!self) return;
+
+  if (!self->statePubEnabled) return;
+  if (!self->stateTopic || !self->stateTopic[0]) return;
+  if (!self->mqtt || !self->mqttConnected) return;
+
+  //last published as prev to keep prev/curr consistent 
+  statemq::StateMQ::StateId prevId =
+      self->hasLastStatePub ? self->lastStatePub : ctx.prev;
+
+  statemq::StateMQ::StateId currId = ctx.curr;
+
+  self->lastStatePub = currId;
+  self->hasLastStatePub = true;
+
+  const char* prevName = self->core.stateName(prevId);
+  const char* currName = self->core.stateName(currId);
+
+  // Arduino uptime 
+  const uint32_t uptime_ms = (uint32_t)millis();
+
+  char payload[256];
+  snprintf(payload, sizeof(payload),
+           "{\"prev\":\"%s\",\"curr\":\"%s\",\"uptime_ms\":%lu}",
+           prevName ? prevName : "",
+           currName ? currName : "",
+           (unsigned long)uptime_ms);
+
+  int q = self->statePubQos;
+  if (q < 0) q = 1;        
+  if (q > 2) q = 2;
+
+  esp_mqtt_client_publish(
+      self->mqtt,
+      self->stateTopic,
+      payload,
+      0,
+      q,
+      self->statePubRetain
+  );
+}
+

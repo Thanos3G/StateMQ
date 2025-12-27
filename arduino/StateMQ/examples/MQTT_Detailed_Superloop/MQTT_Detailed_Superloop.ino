@@ -17,7 +17,6 @@ const char* WIFI_PASS = "your_wifi_password";
 // MQTT broker address
 const char* MQTT_BROKER = "mqtt://broker_ip:1883";
 
-
 // ---------------- topics ----------------
 // Incoming control messages that select the device "State".
 const char* STATE_TOPIC  = "mqtt/state";
@@ -26,7 +25,7 @@ const char* STATE_TOPIC  = "mqtt/state";
 const char* STATUS_TOPIC = "mqtt/status";
 
 // LWT topic published by broker when device disappears.
-const char* WILL_TOPIC   = "mqtt/will";
+const char* LWT_TOPIC  = "mqtt/will";
 
 // Optional raw subscription (not part of the state rule table).
 const char* CHAT_TOPIC   = "mqtt/chat";
@@ -48,17 +47,19 @@ void setup() {
   HELLO_ID = node.map(STATE_TOPIC, "hi",      "HELLO");
   BYE_ID   = node.map(STATE_TOPIC, "goodbye", "BYE");
 
-  // MQTT wrapper configuration
-  esp.setSubscribeQos(STATE_TOPIC, /*qos=*/1);
 
   // Keep alive interval (seconds)
   esp.setKeepAliveSeconds(5);
 
-  // Optional raw subscription (not part of the state rule table).
+  // Raw subscription (not part of the state rule table).
   esp.subscribe(CHAT_TOPIC, /*qos=*/0);
 
-  // Configure MQTT Last-Will message
-  esp.setLastWill(WILL_TOPIC, "OFFLINE", /*qos=*/1, /*retain=*/false);
+  //Publish State Change
+  esp.StatePublishTopic("lab/node/status", /*qos=*/1, /*enable=*/true, /*retain=*/true);
+
+
+   //Set Last Will Message
+  esp.setLastWill(LWT_TOPIC, "offline", 2, true);
 
   // Start Wi-Fi and MQTT
   esp.begin(WIFI_SSID, WIFI_PASS, MQTT_BROKER);

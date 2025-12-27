@@ -49,6 +49,8 @@ public:
   bool subscribe(const char* topic, int qos = 0);
   const char* msg(const char* topic);
 
+  void StatePublishTopic(const char* topic, int qos = -1, bool enable = true, bool retain = true);
+
   bool publish(const char* topic,
                const char* payload,
                int qos = 0,
@@ -62,13 +64,24 @@ public:
                    bool retain = true);
   void clearLastWill();
 
+
+  // enable/disable core tasks at runtime
+  bool taskEnable(statemq::StateMQ::TaskId id, bool enable);
+
 private:
   struct UserTaskCtx {
     StateMQEsp32* owner = nullptr;
+
+    // Core task callbacks 
     void (*fn)() = nullptr;
+    void (*fnEx)(void*) = nullptr;
+    void* user = nullptr;
+
     uint32_t period_ms = 1000;
     TaskHandle_t handle = nullptr;
     UserTaskCtx* next = nullptr;
+
+    statemq::StateMQ::TaskId id = 0;
   };
 
   static void user_task_trampoline(void* arg);
@@ -77,6 +90,8 @@ private:
                                             int event_id,
                                             void* event_data);
   static void reconnect_task_trampoline(void* arg);
+
+  static void on_state_change_trampoline(const statemq::StateMQ::StateChangeCtx& ctx);
 
   void reconnectLoop();
   void startReconnectTask();
@@ -88,6 +103,7 @@ private:
   void silenceEspIdfNoise();
   int qosForTopic(const char* topic) const;
 
+
   static char* dupstr(const char* s);
   static void  freestr(char*& s);
 
@@ -98,6 +114,8 @@ private:
   void unlockCore();
   void lockCoreBlocking();
 
+  static uint32_t stackBytesFor(statemq::Stack s);
+
 private:
   statemq::StateMQ& core;
   esp_mqtt_client_handle_t mqtt = nullptr;
@@ -105,6 +123,15 @@ private:
   char* wifiSsid  = nullptr;
   char* wifiPass  = nullptr;
   char* brokerUri = nullptr;
+
+  char* stateTopic = nullptr;
+  int   statePubQos = -1;
+  bool  statePubEnabled = false;
+
+  statemq::StateMQ::StateId lastStatePub = statemq::StateMQ::OFFLINE_ID;
+  bool hasLastStatePub = false;
+  bool  statePubRetain = true;
+
 
   volatile bool mqttConnected = false;
 

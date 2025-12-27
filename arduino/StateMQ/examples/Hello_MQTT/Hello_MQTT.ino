@@ -94,8 +94,8 @@ void setup() {
   node.taskEvery("print", 500, small, printTask, true);
   node.taskEvery("led",   100, small, ledTask, true);
 
-  // MQTT wrapper configuration
-  esp.setSubscribeQos(STATE_TOPIC, /*qos=*/1);
+  // Set QoS to subscribr topic explicitly
+  esp.subscribe(STATE_TOPIC, /*qos=*/1);
 
   // Start Wi-Fi and MQTT
   esp.begin(WIFI_SSID, WIFI_PASS, MQTT_BROKER);

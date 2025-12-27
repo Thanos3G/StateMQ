@@ -1,17 +1,14 @@
 // main/app_main.cpp
 //
-// StateMQ ESP-IDF example: simple HELLO / BYE state control.
+// StateMQ ESP-IDF example: HELLO / BYE with edge-triggered transitions.
 //
-// MQTT interface (what to publish / subscribe):
+// MQTT interface:
 // - Publish to:   hello/state
-//   Messages:     "hi", "bye"
-//   Effect:       changes internal StateMQ and led state 
+//   Payloads:     "hi", "bye"
 //
-//
-// Notes:
-// - Demonstrates basic message-to-state mapping.
-// - Periodic tasks react to the current state.
-//
+// Behavior:
+// - Periodic tasks react to the current state (level)
+// - onStateChange() reacts to transitions (edge)
 
 #include <cstring>
 
@@ -27,14 +24,10 @@ using namespace statemq;
 static constexpr gpio_num_t LED_PIN = GPIO_NUM_21;
 
 // ---------------- topics ----------------
-// Incoming control messages that select the device "State".
-static constexpr const char* STATE_TOPIC = "hello/state";
+static constexpr const char* STATE_TOPIC  = "hello/state";
 
 // ---------------- node ----------------
-// Create the core state machine
 static StateMQ node;
-
-// Configure the ESP32 MQTT node
 static StateMQEsp esp(node);
 
 using StateId = StateMQ::StateId;
@@ -69,7 +62,6 @@ static void printTask() {
     printf("Connected\n");
   }
 }
-
 // Task 2: control LED based on state
 static void ledTask() {
   StateId s = node.stateId();
@@ -86,6 +78,32 @@ static void ledTask() {
   }
 }
 
+// ---------------- EDGE CALLBACK ----------------
+//
+// exactly once per transition
+static void onEdge(const StateMQ::StateChangeCtx& ctx) {
+  printf("[edge] %s -> %s (cause=%u)\n",
+         node.stateName(ctx.prev),
+         node.stateName(ctx.curr),
+         (unsigned)ctx.cause);
+
+  // Enter HELLO
+  if (ctx.curr == HELLO_ID && ctx.prev != HELLO_ID) {
+    printf("[edge] Entered HELLO (one-shot)\n");
+  }
+
+  // HELLO -> BYE
+  if (ctx.prev == HELLO_ID && ctx.curr == BYE_ID) {
+    printf("[edge] HELLO -> BYE (one-shot)\n");
+  }
+
+  // Leaving OFFLINE
+  if (ctx.prev == StateMQ::OFFLINE_ID &&
+      ctx.curr != StateMQ::OFFLINE_ID) {
+    printf("[edge] Device came online\n");
+  }
+}
+
 extern "C" void app_main(void) {
   // GPIO setup
   gpio_config_t io{};
@@ -95,18 +113,19 @@ extern "C" void app_main(void) {
   ledWrite(false);
 
   // MQTT (topic,payload) -> StateId
-  // Publish to hello/state with payload:
-  //   "hi"  -> HELLO
-  //   "bye" -> BYE
   HELLO_ID = node.map(STATE_TOPIC, "hi",  "HELLO");
   BYE_ID   = node.map(STATE_TOPIC, "bye", "BYE");
 
   // tasks
   node.taskEvery("print", 500, Stack::Small, printTask, true);
   node.taskEvery("led",   100, Stack::Small, ledTask, true);
-  
-  // Publish upon state transition
+
+  // edge call
+  node.onStateChange(onEdge);
+
+  // Subscribe to state topic with specific QoS
   esp.StatePublishTopic("hello/status", /*qos=*/1, /*retain*/true, /*enable=*/true);
+
 
   // Subscribe to state topic with specific QoS
   esp.subscribe(STATE_TOPIC, /*qos=*/1);

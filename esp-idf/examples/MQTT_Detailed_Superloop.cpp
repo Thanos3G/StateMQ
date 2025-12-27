@@ -36,8 +36,8 @@ extern "C" void app_main(void) {
   HELLO_ID = node.map(STATE_TOPIC, "hi",      "HELLO");
   BYE_ID   = node.map(STATE_TOPIC, "goodbye", "BYE");
 
-  // Subscribe QoS
-  esp.setSubscribeQos(STATE_TOPIC, 1);
+  // Subscribe QoS for mapped states
+  esp.setDefaultSubscribeQos(1);
 
   //MQTT Keep_Alive
   esp.setKeepAliveSeconds(5);
@@ -57,8 +57,7 @@ extern "C" void app_main(void) {
   esp.begin(
     ssid,
     pass,
-    broker,
-    nullptr
+    broker
   );
 
   //Compares the state with the previous

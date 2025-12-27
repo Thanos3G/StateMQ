@@ -1,13 +1,9 @@
 #include <Arduino.h>
 #include <StateMQ_ESP32.h>
 
-// WiFi credentials
 const char* WIFI_SSID = "your_wifi_ssid";
 const char* WIFI_PASS = "your_wifi_password";
-
-// MQTT broker address
 const char* MQTT_BROKER = "mqtt://broker_ip:1883";
-
 const char* STATE_TOPIC = "hello/topic";
 
 StateMQ node;

@@ -18,7 +18,6 @@ namespace statemq {
 static const char* TAG_WIFI = "statemq_wifi";
 static const char* TAG_MQTT = "statemq_mqtt";
 
-StateMQEsp* StateMQEsp::g_self = nullptr;
 
 
 // Helpers
@@ -73,10 +72,15 @@ void StateMQEsp::user_task_trampoline(void* arg) {
   if (!ctx) vTaskDelete(nullptr);
 
   for (;;) {
-    if (ctx->cb) ctx->cb();
+    if (ctx->cb) {
+      ctx->cb();
+    } else if (ctx->cbEx) {
+      ctx->cbEx(ctx->user);
+    }
     vTaskDelay(pdMS_TO_TICKS(ctx->period_ms));
   }
 }
+
 
 // Construction / destruction
 
@@ -101,9 +105,6 @@ void StateMQEsp::setDefaultPublishQos(int qos) {
   defaultPubQos = clamp_qos(qos);
 }
 
-void StateMQEsp::setRetainState(bool retain) {
-  retainState = retain;
-}
 
 void StateMQEsp::freeQosOverrides() {
   for (size_t i = 0; i < qosCount; ++i) {
@@ -111,26 +112,6 @@ void StateMQEsp::freeQosOverrides() {
     qosTopic[i] = nullptr;
   }
   qosCount = 0;
-}
-
-void StateMQEsp::setSubscribeQos(const char* topic, int qos) {
-  if (!topic) return;
-  qos = clamp_qos(qos);
-
-  for (size_t i = 0; i < qosCount; ++i) {
-    if (qosTopic[i] && std::strcmp(qosTopic[i], topic) == 0) {
-      qosValue[i] = (int8_t)qos;
-      return;
-    }
-  }
-
-  if (qosCount < MAX_QOS_OVERRIDES) {
-    char* copy = dupstr(topic);
-    if (!copy) return;
-    qosTopic[qosCount] = copy;
-    qosValue[qosCount] = (int8_t)qos;
-    qosCount++;
-  }
 }
 
 int StateMQEsp::qosForTopic(const char* topic) const {
@@ -203,7 +184,22 @@ bool StateMQEsp::subscribe(const char* topic, int qos) {
     rawCount++;
   }
 
-  setSubscribeQos(topic, qos);
+  bool updated = false;
+  for (size_t i = 0; i < qosCount; ++i) {
+    if (qosTopic[i] && std::strcmp(qosTopic[i], topic) == 0) {
+      qosValue[i] = (int8_t)qos;
+      updated = true;
+      break;
+    }
+  }
+  if (!updated && qosCount < MAX_QOS_OVERRIDES) {
+    char* copy = dupstr(topic);
+    if (copy) {
+      qosTopic[qosCount] = copy;
+      qosValue[qosCount] = (int8_t)qos;
+      qosCount++;
+    }
+  }
 
   // If already connected, subscribe immediately.
   if (mqttConnected && client) {
@@ -240,19 +236,32 @@ void StateMQEsp::cleanup(bool disconnect_wifi, bool clear_config) {
     for (size_t i = 0; i < taskHandlesCount; ++i) {
       if (taskHandles[i]) {
         vTaskDelete((TaskHandle_t)taskHandles[i]);
+        taskHandles[i] = nullptr;
       }
     }
     delete[] taskHandles;
     taskHandles = nullptr;
-    taskHandlesCount = 0;
   }
+
+  // free task contexts
+  if (taskCtxs) {
+    for (size_t i = 0; i < taskHandlesCount; ++i) {
+      delete taskCtxs[i];
+      taskCtxs[i] = nullptr;
+    }
+    delete[] taskCtxs;
+    taskCtxs = nullptr;
+  }
+
+  taskHandlesCount = 0;
+
 
   freestr(wifiSsid);
   freestr(wifiPass);
   freestr(brokerUri);
-  freestr(stateTopic);
 
   if (clear_config) {
+    freestr(stateTopic);
     freeQosOverrides();
     clearLastWill();
     rawCount = 0;
@@ -261,7 +270,9 @@ void StateMQEsp::cleanup(bool disconnect_wifi, bool clear_config) {
       raw[i].payload[0] = '\0';
       raw[i].hasNew = false;
     }
+    StatePublishTopic("", -1, false);
   }
+
 
   if (disconnect_wifi) {
     esp_wifi_disconnect();
@@ -270,15 +281,27 @@ void StateMQEsp::cleanup(bool disconnect_wifi, bool clear_config) {
 }
 
 void StateMQEsp::end(bool disconnect_wifi) {
-  if (g_self == this) g_self = nullptr;
   cleanup(disconnect_wifi, true);
 }
+
+//public current and previous state upon transition
+void StateMQEsp::StatePublishTopic(const char* topic, int qos, bool enable, bool retain) {
+  freestr(stateTopic);
+  stateTopic = dupstr(topic ? topic : "");
+  statePubQos = qos;
+  statePubEnabled = enable && (stateTopic && stateTopic[0]);
+  statePubRetain = retain;
+
+  hasLastStatePub = false;
+  lastStatePub = StateMQ::OFFLINE_ID;
+}
+
 
 
 bool StateMQEsp::begin(const char* wifi_ssid,
                        const char* wifi_pass,
-                       const char* broker_uri,
-                       const char* state_topic) {
+                       const char* broker_uri)
+{
   cleanup(false, false);
 
   if (!wifi_ssid || !broker_uri) return false;
@@ -286,7 +309,6 @@ bool StateMQEsp::begin(const char* wifi_ssid,
   wifiSsid   = dupstr(wifi_ssid);
   wifiPass   = dupstr(wifi_pass ? wifi_pass : "");
   brokerUri  = dupstr(broker_uri);
-  stateTopic = dupstr(state_topic ? state_topic : "");
 
   if (!wifiSsid || !wifiPass || !brokerUri) {
     end(false);
@@ -323,22 +345,17 @@ bool StateMQEsp::begin(const char* wifi_ssid,
   ESP_LOGI(TAG_WIFI, "WiFi start -> connecting...");
   ESP_ERROR_CHECK(esp_wifi_connect());
 
-  // ---- auto publish state on state change ----
-  core.onStateChange([](const char* st) {
-    (void)st;
-  });
-  g_self = this;
-  core.onStateChange(&StateMQEsp::on_state_change_trampoline);
-
+  core.onStateChange(&StateMQEsp::on_state_change_trampoline, this);
 
   // ---- start tasks ----
   taskHandlesCount = core.taskCount();
   taskHandles = new (std::nothrow) void*[taskHandlesCount]();
+  taskCtxs    = new (std::nothrow) UserTaskCtx*[taskHandlesCount](); // NEW
 
   for (size_t i = 0; i < core.taskCount(); ++i) {
     const TaskDef& t = core.task(i);
 
-    auto* ctx = new (std::nothrow) UserTaskCtx{t.callback, t.period_ms};
+    auto* ctx = new (std::nothrow) UserTaskCtx{t.callback, t.callbackEx, t.user, t.period_ms};
     if (!ctx) continue;
 
     TaskHandle_t handle = nullptr;
@@ -352,12 +369,12 @@ bool StateMQEsp::begin(const char* wifi_ssid,
           1,
           &handle) != pdPASS) {
       delete ctx;
+      if (taskCtxs && i < taskHandlesCount) taskCtxs[i] = nullptr;
       continue;
     }
 
-    if (taskHandles && i < taskHandlesCount) {
-      taskHandles[i] = handle;
-    }
+    if (taskHandles && i < taskHandlesCount) taskHandles[i] = handle;
+    if (taskCtxs    && i < taskHandlesCount) taskCtxs[i] = ctx;
 
     if (!t.enabled && handle) {
       vTaskSuspend(handle);
@@ -366,6 +383,7 @@ bool StateMQEsp::begin(const char* wifi_ssid,
 
   return true;
 }
+
 
 // Runtime
 
@@ -582,24 +600,37 @@ void StateMQEsp::stopMqtt() {
 }
 
 
-void StateMQEsp::on_state_change_trampoline(const char* st) {
-  auto* self = StateMQEsp::g_self;
+void StateMQEsp::on_state_change_trampoline(const StateMQ::StateChangeCtx& ctx) {
+  auto* self = static_cast<StateMQEsp*>(ctx.user);
   if (!self) return;
 
+  if (!self->statePubEnabled) return;
   if (!self->stateTopic || !self->stateTopic[0]) return;
   if (!self->client || !self->mqttConnected) return;
 
-  char payload[160];
+  // Use last published as prev
+  StateMQ::StateId prevId = self->hasLastStatePub ? self->lastStatePub : ctx.prev;
+  StateMQ::StateId currId = ctx.curr;
+  self->lastStatePub = currId;
+  self->hasLastStatePub = true;
+
+  const char* prevName = self->core.stateName(prevId);
+  const char* currName = self->core.stateName(currId);
+
+  char payload[256];
   std::snprintf(payload, sizeof(payload),
-                "{\"state\":\"%s\",\"uptime_ms\":%u}",
-                st ? st : "UNKNOWN",
+                "{\"prev\":\"%s\",\"curr\":\"%s\",\"uptime_ms\":%u}",
+                prevName ? prevName : "",
+                currName ? currName : "",
                 (unsigned)uptime_ms());
 
-  int q = clamp_qos(self->defaultPubQos);
-  bool retain = self->retainState;
+  int q = (self->statePubQos < 0) ? self->defaultPubQos : self->statePubQos;
+  q = clamp_qos(q);
 
-  esp_mqtt_client_publish(self->client, self->stateTopic, payload, 0, q, retain);
+  esp_mqtt_client_publish(self->client, self->stateTopic, payload, 0, q, self->retainState);
 }
+
+
 
 
 } // namespace statemq

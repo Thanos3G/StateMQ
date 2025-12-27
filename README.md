@@ -19,16 +19,16 @@ This pattern made systems increasingly difficult to extend, reason about, and ma
 StateMQ’s approach:
 
 - Treat MQTT messages as events, not commands.
-- Events trigger explicit state changes.
+- Events trigger explicit state transitions.
 - The system is always in exactly one known state.
 - States are represented internally by small integer identifiers.
-- Application logic reacts to state changes rather than raw messages.
+- Application logic reacts to state transitions rather than raw messages.
 - Periodic work runs independently as scheduled tasks.
 
 Execution model:
 
 - MQTT messages are processed sequentially.
-- State changes are resolved using a fixed, table-driven `(topic, payload) → state` mapping.
+- State transitions are resolved using a fixed, table-driven `(topic, payload) → state` mapping.
 - Execution remains deterministic and predictable.
 
 Originally developed for ESP32, the core abstraction is platform-agnostic and applicable to other state-driven, message-based embedded systems.
@@ -117,17 +117,17 @@ subscription and publication beyond the state mapping.
                         |
                         v
      +------------------------------------------+
-     |        StateMQ + Platform Layer           |
-     |-------------------------------------------|
-     | - network and MQTT lifecycle              |
-     | - event delivery                          |
-     | - state rules and changes                 |
-     | - known state tracking                    |
-     | - periodic task scheduling                |
+     |        StateMQ + Platform Layer          |
+     |------------------------------------------|
+     | - network and MQTT lifecycle             |
+     | - event delivery                         |
+     | - state rules and transitions            |
+     | - known state tracking                   |
+     | - periodic task scheduling               |
      +------------------------------------------+
                          |
                          v
-                    state change
+                    state transitions
                          |
         +----------------+-------------------+
         |                |                   |
@@ -142,16 +142,16 @@ subscription and publication beyond the state mapping.
 ```
 ## Core API
 
-### State Changes
+### State Transitions
 
-StateMQ processes MQTT messages one at a time and resolves state changes
+StateMQ processes MQTT messages one at a time and resolves state transitions
 using a simple rule table that maps incoming messages to integer state identifiers.
-State changes are serialized using a mutex to ensure thread-safe, deterministic updates.
+State transitions are serialized using a mutex to ensure thread-safe, deterministic updates.
 
 When an MQTT message arrives, StateMQ checks each configured rule in the
 order it was added. If a rule matches the message topic and payload, the
 system jumps to the corresponding state. If no rule matches, the
-current state remains unchanged.
+current state remains unchanged. State transitions optionally expose full transition context (previous state, current state, cause), enabling edge-triggered logic and transition-aware telemetry.
 
 ```text
 onMessage(topic, payload):
@@ -163,13 +163,13 @@ onMessage(topic, payload):
     // no match → state remains unchanged
 ```
 In systems with many rules or very high message rates, the same behavior
-could be implemented using an indexed lookup instead of a linear scan.
+could be implemented using an indexed lookup instead of a linear scan. 
 
 
 
 ### Message to State Mapping
 
-State changes are defined declaratively by mapping incoming MQTT messages to states:
+State transitions are defined declaratively by mapping incoming MQTT messages to states:
 
 
 ```cpp
@@ -201,18 +201,23 @@ Tasks can be enabled or disabled at runtime.
 ### Subscriptions and Publishing
 
 The platform wrappers expose basic MQTT publishing and subscription 
-configuration for telemetry, logs, and auxiliary topics.
+configuration for telemetry, logs, and auxiliary topics. QoS configuration supports both global defaults and simplified per-topic overrides via overloaded APIs.
 
 ```cpp
-// Publish arbitrary MQTT messages
+// Publish arbitrary MQTT messages (telemetry/logs/etc.)
 esp.publish("node/log", "booted", /*qos=*/1, /*retain=*/false);
 
-// Configure global and per-topic QoS
+// Configure subscribe QoS defaults + per-topic subscribe QoS
 esp.setDefaultSubscribeQos(0);
-esp.setSubscribeQos("node/topic", 2);
+esp.subscribe("node/topic", /*qos=*/2);
 
 // Configure MQTT Last-Will message
 esp.setLastWill("node/status", "offline", /*qos=*/1, /*retain=*/true);
+
+// Publish state transitions (edge-triggered) as JSON (optional)
+// Example payload: {"prev":"IDLE","curr":"RUNNING","uptime_ms":123456}
+esp.StatePublishTopic("node/status/edge", /*qos=*/1, /*retain=*/true, /*enable=*/true);
+
 ```
 
 Complete examples demonstrating message-to-state mappings are provided
@@ -228,7 +233,7 @@ in the Arduino and ESP-IDF example projects included in this repository.
 
 - **Arduino-ESP32**  
   Same StateMQ core, Arduino WiFi integration, and FreeRTOS task execution under the Arduino runtime.  
-  Wi-Fi connection and readiness are handled using lightweight polling during startup due to Arduino runtime constraints, while MQTT messaging and state changes remain event-driven and deterministic.
+  Wi-Fi connection and readiness are handled using lightweight polling during startup due to Arduino runtime constraints, while MQTT messaging and state transitions remain event-driven and deterministic.
   
 
 The core abstraction is designed to be portable and may be adapted to

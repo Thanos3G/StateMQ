@@ -12,7 +12,7 @@ static constexpr bool LED1_INVERT = false;
 static constexpr bool LED2_INVERT = false;
 
 // ---------------- topics ----------------
-static constexpr const char* STATE_TOPIC   = "lab/node/in";
+static constexpr const char* STATE_TOPIC = "lab/node/in";
 static constexpr const char* LOG_TOPIC   = "lab/node/log";
 static constexpr const char* LWT_TOPIC   = "lab/node/lwt";
 
@@ -22,7 +22,6 @@ const char* WIFI_PASS = "your_wifi_password";
 
 // MQTT broker address
 const char* MQTT_BROKER = "mqtt://broker_ip:1883";
-
 
 // ---------------- node ----------------
 StateMQ node;
@@ -130,8 +129,13 @@ void setup() {
   // MQTT config via existing Arduino wrapper APIs
   esp.setDefaultSubscribeQos(2);
   esp.setSubscribeQos(STATE_TOPIC, 2);
-  esp.setKeepAliveSeconds(5);
+  esp.setKeepAliveSeconds(1);
+  
+  //Publish State Change
+  esp.StatePublishTopic("lab/node/status", /*qos=*/1, /*enable=*/true, /*retain=*/true);
 
+
+  //Set Last Will Message
   esp.setLastWill(LWT_TOPIC, "offline", 2, true);
 
   // connect

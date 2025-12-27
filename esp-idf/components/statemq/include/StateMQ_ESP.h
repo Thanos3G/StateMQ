@@ -22,7 +22,6 @@ public:
   void setKeepAliveSeconds(uint16_t sec);
 
   void setDefaultSubscribeQos(int qos);
-  void setSubscribeQos(const char* topic, int qos);
 
   void setLastWill(const char* topic,
                    const char* payload,
@@ -30,7 +29,6 @@ public:
                    bool retain = true);
   void clearLastWill();
 
-  void setRetainState(bool retain);
   void setDefaultPublishQos(int qos);
 
   bool subscribe(const char* topic, int qos = 0);
@@ -38,8 +36,8 @@ public:
 
   bool begin(const char* wifi_ssid,
              const char* wifi_pass,
-             const char* broker_uri,
-             const char* state_topic = nullptr);
+             const char* broker_uri
+             );
 
   void end(bool disconnect_wifi = false);
 
@@ -51,6 +49,10 @@ public:
   bool connected() const;
 
   bool taskEnable(StateMQ::TaskId id, bool enable);
+
+  // enable state publish topic in one call
+  void StatePublishTopic(const char* topic, int qos = -1, bool enable = true, bool retain = true);
+
 
 private:
   static char* dupstr(const char* s);
@@ -76,8 +78,11 @@ private:
 
   struct UserTaskCtx {
     void (*cb)();
+    void (*cbEx)(void*);
+    void* user;
     uint32_t period_ms;
   };
+
   static void user_task_trampoline(void* arg);
 
   static void wifi_event_handler(void* arg,
@@ -106,7 +111,12 @@ private:
   char* wifiSsid  = nullptr;
   char* wifiPass  = nullptr;
   char* brokerUri = nullptr;
+
   char* stateTopic = nullptr;
+  int   statePubQos = -1;
+  bool  statePubEnabled = false;
+  bool  statePubRetain = true;
+
 
   esp_mqtt_client_handle_t client = nullptr;
 
@@ -117,6 +127,7 @@ private:
   int defaultSubQos = 1;
   int defaultPubQos = 1;
   bool retainState  = true;
+
 
   bool  lwtEnabled  = false;
   char* willTopic   = nullptr;
@@ -129,14 +140,19 @@ private:
   int8_t qosValue[MAX_QOS_OVERRIDES]{};
   size_t qosCount = 0;
 
-  void** taskHandles = nullptr;
+ void** taskHandles = nullptr;
+  UserTaskCtx** taskCtxs = nullptr;    
   size_t taskHandlesCount = 0;
+
 
   RawSlot raw[MAX_RAW_SUBS]{};
   size_t rawCount = 0;
 
-  static void on_state_change_trampoline(const char* st);
-  static StateMQEsp* g_self;
+  StateMQ::StateId lastStatePub = StateMQ::OFFLINE_ID;
+  bool hasLastStatePub = false;
+
+  static void on_state_change_trampoline(const StateMQ::StateChangeCtx& ctx);
+
 };
 
 } // namespace statemq
