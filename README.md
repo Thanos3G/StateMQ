@@ -240,8 +240,8 @@ in the Arduino and ESP-IDF example projects included in this repository.
 
 The core abstraction is designed to be portable and may be adapted to
 other platforms in the future, particularly environments that provide
-FreeRTOS or a similar tasking model, including Arduino environments
-using Arduino_FreeRTOS. Traditional AVR-based Arduino platforms are unlikely to be a good fit due to the lack of native
+FreeRTOS or a similar tasking model, including boards
+using Arduino_FreeRTOS. Traditional AVR-based Arduino boards are unlikely to be a good fit due to the lack of native
 concurrency and MQTT library support.
 
 ## Design Constraints
